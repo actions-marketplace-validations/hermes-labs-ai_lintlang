@@ -39,10 +39,38 @@ class UnicodeDecodeErrorWithHint(UnicodeDecodeError, ValueError):
         return self.message
 
 
+_WIDE_ENCODING_SAMPLE_BYTES = 8192
+_WIDE_ENCODING_MIN_NUL_RATIO = 0.20
+
+
+def _looks_like_bomless_wide_encoding(raw: bytes) -> bool:
+    """Return whether valid UTF-8 bytes have a UTF-16/32 NUL signature.
+
+    ASCII-heavy UTF-16 and UTF-32 without a BOM are also valid UTF-8 because
+    their zero high bytes decode as U+0000. Inspecting a bounded prefix is
+    sufficient: a genuinely wide-encoded document has the pattern from its
+    first code unit, while an isolated NUL in otherwise valid UTF-8 content is
+    not an encoding signal.
+    """
+    sample = raw[:_WIDE_ENCODING_SAMPLE_BYTES]
+    if not sample:
+        return False
+
+    # ASCII-heavy UTF-16 and UTF-32 are at least 50% and 75% NUL bytes,
+    # respectively. Twenty percent leaves room for mixed text while keeping a
+    # sparse accidental U+0000 well below the encoding threshold.
+    return sample.count(0) / len(sample) >= _WIDE_ENCODING_MIN_NUL_RATIO
+
+
 def decode_file_bytes(raw: bytes) -> str:
-    """Decode raw bytes as UTF-8 with actionable decode errors."""
+    """Decode raw bytes as UTF-8 with actionable decode errors.
+
+    ASCII-heavy UTF-16/UTF-32 without a byte-order mark decodes as valid UTF-8.
+    Detect its repeated NUL-byte density without rejecting isolated U+0000 bytes
+    in otherwise valid UTF-8 text.
+    """
     try:
-        return raw.decode("utf-8")
+        decoded = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
             message = (
@@ -52,6 +80,16 @@ def decode_file_bytes(raw: bytes) -> str:
         else:
             message = "File is not valid UTF-8. LintLang requires UTF-8 encoding."
         raise UnicodeDecodeErrorWithHint(message, error) from error
+    if _looks_like_bomless_wide_encoding(raw):
+        nul_offset = raw.index(0)
+        raise UnicodeDecodeErrorWithHint(
+            "LintLang reads UTF-8 and the file appears to be UTF-16 or UTF-32 "
+            "without a byte-order mark. Please save or convert the file as UTF-8.",
+            UnicodeDecodeError(
+                "utf-8", raw, nul_offset, nul_offset + 1, "wide-encoding NUL-byte pattern"
+            ),
+        )
+    return decoded
 
 
 def read_file_text(path: str | Path) -> str:
