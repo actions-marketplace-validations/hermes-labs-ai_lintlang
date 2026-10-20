@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from lintlang.cli import main
-from lintlang.parsers import decode_file_bytes, parse_file, parse_source
+from lintlang.parsers import (
+    UnicodeDecodeErrorWithHint,
+    decode_file_bytes,
+    parse_file,
+    parse_source,
+)
 from lintlang.scanner import scan_file, scan_python_file, scan_source
 
 
@@ -81,6 +86,52 @@ def test_valid_multilingual_utf8_cli_input(tmp_path, monkeypatch, capsys, input_
     assert result["file"] == "agent.yaml"
     assert result["input_error"] is None
     assert result["inspected"]["system_prompt"] == 1
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"])
+def test_bomless_utf16_and_utf32_are_rejected(encoding):
+    """A BOM-less wide encoding is mostly NULs and decodes as UTF-8.
+
+    Without this guard the detectors inspect ``Y\\x00o\\x00u\\x00...`` and match
+    nothing, so a broken prompt reports PASS on a ``--fail-on fail`` gate.
+    """
+    raw = "You are a helpful assistant.\nKeep trying until it works.\n".encode(encoding)
+
+    with pytest.raises(UnicodeDecodeErrorWithHint, match="without a byte-order mark"):
+        decode_file_bytes(raw)
+
+
+def test_bomless_utf16_does_not_report_clean(tmp_path, monkeypatch, capsys):
+    """The false-clean from the issue: a BOM-less UTF-16 prompt must be ERROR."""
+    raw = "You are a helpful assistant.\nKeep trying until it works.\n".encode("utf-16-le")
+    (tmp_path / "prompt.txt").write_bytes(raw)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["scan", "prompt.txt", "--format", "json"]) == 1
+    [result] = json.loads(capsys.readouterr().out)
+    assert result["verdict"] == "ERROR"
+    assert "without a byte-order mark" in result["input_error"]
+    assert result["structural_findings"] == []
+
+
+def test_bomless_utf16_directory_and_stdin_paths_also_fail(tmp_path, monkeypatch, capsys):
+    """The guard covers every input path, not just a named file."""
+    raw = "You are a helpful assistant.\nKeep trying until it works.\n".encode("utf-16-le")
+
+    (tmp_path / "prompt.txt").write_bytes(raw)
+    monkeypatch.chdir(tmp_path)
+    assert main(["scan", ".", "--format", "json"]) == 1
+    assert "without a byte-order mark" in capsys.readouterr().out
+
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(raw)))
+    assert main(["scan", "-", "--stdin-filename", "prompt.txt", "--format", "json"]) == 1
+    assert "without a byte-order mark" in capsys.readouterr().out
+
+
+def test_utf8_without_nul_still_decodes():
+    """The guard must not reject ordinary UTF-8, including multilingual text."""
+    source = "Check café, 日本語, العربية, and 🐍 records.\nBe concise.\n"
+    assert decode_file_bytes(source.encode("utf-8")) == source
 
 
 @pytest.mark.parametrize(
