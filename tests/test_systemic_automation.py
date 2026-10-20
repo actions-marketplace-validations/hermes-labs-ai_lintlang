@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "proof-benchmark.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-sync.yml"
 RELEASE_NOTES = REPO_ROOT / ".github" / "releases" / "v0.8.3.md"
+README = REPO_ROOT / "README.md"
 SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync-version-docs.py"
 
 
@@ -59,26 +60,58 @@ def test_release_workflow_is_tag_driven_and_publishes_curated_release_once():
 
     assert 'tags:\n      - "v*"' in text
     assert "workflow_call:" in text
-    assert set(jobs) == {"build", "github-release"}
+    assert "workflow_dispatch:" in text
+    assert set(jobs) == {"build", "github-release", "pypi-dispatch"}
     assert all(
         job.get("permissions", {}).get("contents") != "write"
         for name, job in jobs.items()
-        if name != "github-release"
+        if name not in {"github-release", "pypi-dispatch"}
     )
     build_run = "\n".join(str(step.get("run", "")) for step in jobs["build"]["steps"])
     release_run = "\n".join(str(step.get("run", "")) for step in jobs["github-release"]["steps"])
-    assert "python -m build --wheel" in build_run
+    assert "python -m build" in build_run
+    assert "python -m twine check --strict dist/*" in build_run
     assert "scripts/sync-version-docs.py" in build_run
+    assert "git merge-base --is-ancestor HEAD origin/main" in build_run
     assert "--check" in build_run
     assert "git push" not in text
     assert ".github/releases/${RELEASE_TAG}.md" in build_run
     assert "release-notes.md" in build_run
     assert "release-title.txt" in build_run
+    uploads = [
+        step
+        for step in jobs["build"]["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+    ]
+    assert {step["with"]["name"] for step in uploads} == {
+        "release-distributions",
+        "release-metadata",
+    }
+    assert all(step["with"]["overwrite"] is True for step in uploads)
     assert "--notes-file dist/release-notes.md" in release_run
     assert '--title "$release_title"' in release_run
     assert "--generate-notes" not in release_run
+    assert "--draft=false" in release_run
     assert release_run.count("gh release create") == 1
-    action_steps = [step for job in jobs.values() for step in job["steps"] if "uses" in step]
+    assert "dist/*.tar.gz" in release_run
+    pypi = jobs["pypi-dispatch"]
+    assert pypi["needs"] == "github-release"
+    assert pypi["permissions"] == {"actions": "write", "contents": "read"}
+    assert pypi["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "RELEASE_TAG": "${{ inputs.tag || github.ref_name }}",
+    }
+    dispatch_run = "\n".join(str(step.get("run", "")) for step in pypi["steps"])
+    assert "gh workflow run publish.yml" in dispatch_run
+    assert '--ref "$RELEASE_TAG"' in dispatch_run
+    assert '-f tag="$RELEASE_TAG"' in dispatch_run
+    assert '-f source_run_id="$GITHUB_RUN_ID"' in dispatch_run
+    action_steps = [
+        step
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if "uses" in step
+    ]
     assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", step["uses"]) for step in action_steps)
 
 
@@ -88,10 +121,22 @@ def test_curated_release_notes_match_the_083_public_contract():
     assert notes.startswith("# LintLang v0.8.3 — Better agent-file discovery and diagnostics\n")
     assert "`.cursor/rules/*.mdc`" in notes
     assert "Invalid YAML tool names" in notes
+    assert "which return a coverage error" in notes
+    assert "supported CrewAI" not in notes
     assert "uvx --from lintlang==0.8.3 lintlang scan ." in notes
     assert "No LLM calls during scanning" in notes
     assert "v0.8.2...v0.8.3" in notes
     assert "false positive" not in notes.lower()
+
+
+def test_readme_ci_history_claim_stays_within_the_verified_tag_range():
+    readme = README.read_text(encoding="utf-8")
+
+    assert "Every tagged release points at a commit with a passing CI run" not in readme
+    assert (
+        "Every tagged release from v0.3.1 through v0.8.2 points at a commit "
+        "with a passing CI run"
+    ) in readme
 
 
 def test_repository_docs_are_already_version_synced():

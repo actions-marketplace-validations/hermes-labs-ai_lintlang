@@ -10,6 +10,12 @@ on:
         description: Existing v-prefixed release tag to publish
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed release tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -46,13 +52,15 @@ jobs:
         run: |
           python scripts/verify_release_tag.py --tag "$RELEASE_TAG"
           test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$RELEASE_TAG")"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD origin/main
           python scripts/sync-version-docs.py --version "${RELEASE_TAG#v}" --check
 
-      - name: Build wheel
-        run: python -m build --wheel
+      - name: Build package distributions
+        run: python -m build
 
-      - name: Check wheel metadata
-        run: python -m twine check dist/*
+      - name: Check package metadata
+        run: python -m twine check --strict dist/*
 
       - name: Stage curated release metadata
         run: |
@@ -63,15 +71,25 @@ jobs:
           cp "$notes_file" dist/release-notes.md
           printf '%s\n' "$release_title" > dist/release-title.txt
 
-      - name: Preserve checked release assets
+      - name: Preserve checked distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-assets
+          name: release-distributions
           path: |
             dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Preserve curated release metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-metadata
+          path: |
             dist/release-notes.md
             dist/release-title.txt
           if-no-files-found: error
+          overwrite: true
 
   github-release:
     needs: build
@@ -83,10 +101,16 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
     steps:
-      - name: Retrieve checked release assets
+      - name: Retrieve checked distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-assets
+          name: release-distributions
+          path: dist/
+
+      - name: Retrieve curated release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-metadata
           path: dist/
 
       - name: Publish GitHub Release with curated notes
@@ -96,12 +120,32 @@ jobs:
             gh release edit "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "$release_title" \
-              --notes-file dist/release-notes.md
-            gh release upload "$RELEASE_TAG" dist/*.whl --clobber --repo "$GITHUB_REPOSITORY"
+              --notes-file dist/release-notes.md \
+              --draft=false
+            gh release upload "$RELEASE_TAG" dist/*.whl dist/*.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$RELEASE_TAG" dist/*.whl \
+            gh release create "$RELEASE_TAG" dist/*.whl dist/*.tar.gz \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --title "$release_title" \
               --notes-file dist/release-notes.md
           fi
+
+  pypi-dispatch:
+    needs: github-release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Dispatch top-level trusted publisher
+        run: |
+          gh workflow run publish.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$RELEASE_TAG" \
+            -f tag="$RELEASE_TAG" \
+            -f source_run_id="$GITHUB_RUN_ID"

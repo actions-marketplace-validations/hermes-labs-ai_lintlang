@@ -7,9 +7,9 @@
 - Project instruction discovery now includes `.cursor/rules/*.mdc` files,
   including the pre-commit integration path. Added in
   [#170](https://github.com/hermes-labs-ai/lintlang/pull/170).
-- The shipped framework fixtures now include supported CrewAI role/goal and
-  backstory shapes plus an AutoGen-style system message, with documentation
-  that states their inspection boundaries. Added in
+- The shipped framework fixtures now document CrewAI backstory extraction and
+  explicit coverage errors for short CrewAI role/goal and root AutoGen-style
+  `system_message` shapes. Added in
   [#167](https://github.com/hermes-labs-ai/lintlang/pull/167).
 
 ### Changed

@@ -50,22 +50,28 @@ def test_release_tag_verifier_accepts_only_matching_v_prefixed_version(tmp_path)
 def test_publish_workflow_builds_checked_out_release_tag_with_immutable_actions():
     workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
     triggers = workflow[True]
-    assert triggers["release"] == {"types": ["published"]}
-    assert triggers["workflow_dispatch"]["inputs"]["tag"]["required"] is True
-    assert set(workflow["jobs"]) == {"build", "publish"}
-    build = workflow["jobs"]["build"]
+    assert set(triggers) == {"workflow_dispatch"}
+    inputs = triggers["workflow_dispatch"]["inputs"]
+    assert inputs["tag"]["required"] is True
+    assert inputs["source_run_id"]["required"] is True
+    assert set(workflow["jobs"]) == {"verify", "publish"}
+    verify_job = workflow["jobs"]["verify"]
     publish = workflow["jobs"]["publish"]
-    assert build["permissions"] == {"contents": "read"}
-    release_tag = "${{ github.event.release.tag_name || inputs.tag }}"
-    assert build["env"] == {"RELEASE_TAG": release_tag}
-    assert "environment" not in build
-    assert publish["needs"] == "build"
+    assert verify_job["permissions"] == {"actions": "read", "contents": "read"}
+    release_tag = "${{ inputs.tag }}"
+    assert verify_job["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "RELEASE_TAG": release_tag,
+        "SOURCE_RUN_ID": "${{ inputs.source_run_id }}",
+    }
+    assert "environment" not in verify_job
+    assert publish["needs"] == "verify"
     assert publish["environment"] == "pypi"
-    assert publish["permissions"] == {"id-token": "write"}
-    steps = build["steps"]
+    assert publish["permissions"] == {"actions": "read", "id-token": "write"}
+    steps = verify_job["steps"]
     action_steps = [
         step
-        for job in (build, publish)
+        for job in (verify_job, publish)
         for step in job["steps"]
         if "uses" in step
     ]
@@ -76,7 +82,6 @@ def test_publish_workflow_builds_checked_out_release_tag_with_immutable_actions(
     assert steps.index(checkout) < steps.index(verify := next(
         step for step in steps if step.get("name") == "Verify release tag and commit"
     ))
-    assert steps.index(checkout) < steps.index(next(step for step in steps if step.get("name") == "Build package"))
     assert checkout["with"] == {
         "ref": release_tag,
         "fetch-depth": 0,
@@ -87,24 +92,36 @@ def test_publish_workflow_builds_checked_out_release_tag_with_immutable_actions(
     assert "scripts/sync-version-docs.py" in verify["run"]
     assert "--check" in verify["run"]
     assert "git rev-list -n 1" in verify["run"]
-    assert any(step.get("run") == "python -m build" for step in steps)
-    assert any(step.get("run") == "python -m twine check dist/*" for step in steps)
+    assert "git merge-base --is-ancestor HEAD origin/main" in verify["run"]
+    assert any(step.get("run") == "python -m twine check --strict dist/*" for step in steps)
 
-    upload = next(step for step in build["steps"] if step.get("uses", "").startswith("actions/upload-artifact@"))
-    download = next(
-        step for step in publish["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
-    )
-    assert upload["uses"] == f"actions/upload-artifact@{UPLOAD_ARTIFACT_V7_SHA}"
-    assert upload["with"] == {
-        "name": "release-distributions",
-        "path": "dist/",
-        "if-no-files-found": "error",
-    }
-    assert download["uses"] == f"actions/download-artifact@{DOWNLOAD_ARTIFACT_V8_SHA}"
-    assert download["with"] == {
-        "name": "release-distributions",
-        "path": "dist/",
-    }
+    provenance = next(step for step in steps if step.get("name") == "Verify distribution provenance")
+    assert ".github/workflows/release-sync.yml" in provenance["run"]
+    assert ".head_sha" in provenance["run"]
+    assert ".head_branch" in provenance["run"]
+    assert 'select(.name == "build" and .conclusion == "success")' in provenance["run"]
+    assert 'select(.name == "github-release" and .conclusion == "success")' in provenance["run"]
+
+    versions = next(step for step in steps if step.get("name") == "Verify distribution versions")
+    assert "parse_wheel_filename" in versions["run"]
+    assert "parse_sdist_filename" in versions["run"]
+    assert 'os.environ["RELEASE_TAG"].removeprefix("v")' in versions["run"]
+
+    downloads = [
+        step
+        for job in (verify_job, publish)
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/download-artifact@")
+    ]
+    assert len(downloads) == 2
+    for download in downloads:
+        assert download["uses"] == f"actions/download-artifact@{DOWNLOAD_ARTIFACT_V8_SHA}"
+        assert download["with"] == {
+            "name": "release-distributions",
+            "path": "dist/",
+            "github-token": "${{ github.token }}",
+            "run-id": "${{ inputs.source_run_id }}",
+        }
 
 
 def test_ci_workflow_uses_immutable_checkout_v7():
