@@ -2,18 +2,43 @@
 
 ## [0.8.3] - 2026-10-20
 
+### Added
+
+- Project instruction discovery now includes `.cursor/rules/*.mdc` files,
+  including the pre-commit integration path. Contributed by
+  [@Soham-o](https://github.com/Soham-o) in
+  [#170](https://github.com/hermes-labs-ai/lintlang/pull/170).
+- The shipped framework fixtures now document CrewAI backstory extraction and
+  explicit coverage errors for short CrewAI role/goal and root AutoGen-style
+  `system_message` shapes. Added in
+  [#167](https://github.com/hermes-labs-ai/lintlang/pull/167).
+
+### Changed
+
+- Claude Code and Cursor plugin metadata, setup guidance, real scan output,
+  integration examples, and measured-scope documentation were refreshed in
+  [#169](https://github.com/hermes-labs-ai/lintlang/pull/169) and
+  [#172](https://github.com/hermes-labs-ai/lintlang/pull/172).
+- Development compatibility now accepts Ruff 0.16.1 through the 0.17 series.
+  Updated in [#175](https://github.com/hermes-labs-ai/lintlang/pull/175).
+
 ### Fixed
 
-- BOM-less UTF-16 and UTF-32 input can no longer decode as NUL-laden UTF-8
-  and silently report a clean scan. The parser now checks a bounded 8 KiB
-  prefix and rejects the wide-encoding signature at 20% or greater NUL
-  density with the existing conversion guidance, while preserving sparse-NUL
-  UTF-8 instruction files. Named files, directory scans, standard input, and
-  every report format now return the same explicit input error. Reported in
+- Common ASCII-heavy, NUL-dense BOM-less UTF-16 and UTF-32 inputs no longer
+  decode as NUL-laden UTF-8 and silently produce a clean scan. The parser
+  checks a bounded 8 KiB prefix and rejects inputs at 20% or greater NUL
+  density with conversion guidance, while preserving sparse-NUL UTF-8. This
+  is a bounded input-integrity guard, not universal wide-encoding detection.
+  Named files, directory scans, standard input, and every report format share
+  the explicit input error. Reported in
   [#168](https://github.com/hermes-labs-ai/lintlang/issues/168); fixed by
   [@yunaremaia](https://github.com/yunaremaia) in
   [#179](https://github.com/hermes-labs-ai/lintlang/pull/179) and refined in
   [#180](https://github.com/hermes-labs-ai/lintlang/pull/180).
+- Invalid YAML tool names now preserve more precise path and field context in
+  their diagnostics. Contributed by
+  [@Soham-o](https://github.com/Soham-o) in
+  [#174](https://github.com/hermes-labs-ai/lintlang/pull/174).
 
 ## [0.8.2] - 2026-09-30
 

@@ -155,7 +155,7 @@ See [GitHub CI and Code Scanning](docs/github.md) and [baseline adoption](docs/b
 
 What we can claim today, and what we can't:
 
-- **1100 passing tests** across 46 test modules (plus 3 skipped and 5 expected failures), run in CI on Python 3.10–3.13 on every pull request and push to `main`. Every tagged release from v0.3.1 through v0.8.2 points at a commit with a passing CI run; the publish workflow checks tag/version parity and builds, it does not re-run the suite. Reproduce with `pip install -e ".[dev]" && pytest -q`.
+- **More than 1,100 passing tests**, run in CI on Python 3.10–3.13 on every pull request and push to `main`. Every tagged release from v0.3.1 through v0.8.2 points at a commit with a passing CI run; the release workflow checks tag/version parity and builds, it does not re-run the suite. Reproduce with `pip install -e ".[dev]" && pytest -q`.
 - **Regression corpus** (`evals/corpus/cases.jsonl`, 2 cases and 23 variants today): immutable case IDs with positive/negative controls per phrase class, each linked to a focused test. It guards detector boundaries against drift — it does not estimate accuracy or false-positive rates.
 - **Sample detection check** (`evals/sample-detection-rate.sh`): 4 deliberately-broken fixtures must fail, 1 clean fixture must pass. A release gate, not a benchmark.
 - **Daily proof loop** (`.github/workflows/proof-benchmark.yml`): a clean clone scans a broken fixture to SARIF, swaps in the clean one, and must go fail → pass in under 300 seconds. It proves the wiring and timing, not accuracy.
