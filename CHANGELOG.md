@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.3] - Unreleased
+
+### Fixed
+
+- BOM-less UTF-16 and UTF-32 input can no longer decode as NUL-laden UTF-8
+  and silently report a clean scan. The parser now checks a bounded 8 KiB
+  prefix and rejects the wide-encoding signature at 20% or greater NUL
+  density with the existing conversion guidance, while preserving sparse-NUL
+  UTF-8 instruction files. Named files, directory scans, standard input, and
+  every report format now return the same explicit input error. Reported in
+  [#168](https://github.com/hermes-labs-ai/lintlang/issues/168); fixed by
+  [@yunaremaia](https://github.com/yunaremaia) in
+  [#179](https://github.com/hermes-labs-ai/lintlang/pull/179) and refined in
+  [#180](https://github.com/hermes-labs-ai/lintlang/pull/180).
+
 ## [0.8.2] - 2026-09-30
 
 ### Added
