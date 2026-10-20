@@ -114,47 +114,85 @@ def test_bomless_utf16_does_not_report_clean(tmp_path, monkeypatch, capsys):
     assert result["structural_findings"] == []
 
 
-def test_bomless_utf16_directory_and_stdin_paths_also_fail(tmp_path, monkeypatch, capsys):
-    """The guard covers every input path, not just a named file."""
-    raw = "You are a helpful assistant.\nKeep trying until it works.\n".encode("utf-16-le")
+def test_sparse_nul_in_real_world_sized_utf8_text_still_scans(tmp_path):
+    """One literal NUL in a large valid skill is content, not an encoding signal."""
+    # Mirrors the measured size and NUL position of the public
+    # Claude-BugHunter hunt-auth-bypass skill without copying its text.
+    size = 32_855
+    nul_offset = 23_277
+    prefix = b"# Instructions\n\n"
+    suffix = b"\nKeep trying until it works.\n"
+    raw = bytearray((b"Review records safely.\n" * ((size // 23) + 1))[:size])
+    raw[: len(prefix)] = prefix
+    raw[-len(suffix) :] = suffix
+    raw[nul_offset] = 0
+    assert len(raw) == size
 
-    (tmp_path / "prompt.txt").write_bytes(raw)
-    monkeypatch.chdir(tmp_path)
-    assert main(["scan", ".", "--format", "json"]) == 1
-    assert "without a byte-order mark" in capsys.readouterr().out
+    path = tmp_path / "SKILL.md"
+    path.write_bytes(raw)
+    result = scan_file(path)
 
-    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(raw)))
-    assert main(["scan", "-", "--stdin-filename", "prompt.txt", "--format", "json"]) == 1
-    assert "without a byte-order mark" in capsys.readouterr().out
+    assert decode_file_bytes(bytes(raw)) == raw.decode("utf-8")
+    assert result.input_error is None
+    assert any(f.pattern_id == "H2" for f in result.structural_findings)
 
 
-def test_utf8_without_nul_still_decodes():
-    """The guard must not reject ordinary UTF-8, including multilingual text."""
+def test_isolated_nul_inside_detection_sample_is_preserved():
+    raw = bytearray(b"Review records safely.\n" * 100)
+    raw[127] = 0
+
+    assert decode_file_bytes(bytes(raw)) == raw.decode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"\x00" * 1024, (b"\x00" * 512) + (b"x" * 512)],
+    ids=["all-nul", "clustered-nul"],
+)
+def test_nul_dense_text_is_rejected_instead_of_reporting_clean(raw):
+    with pytest.raises(UnicodeDecodeErrorWithHint, match="without a byte-order mark"):
+        decode_file_bytes(raw)
+
+
+def test_ordinary_multilingual_utf8_still_decodes():
     source = "Check café, 日本語, العربية, and 🐍 records.\nBe concise.\n"
     assert decode_file_bytes(source.encode("utf-8")) == source
 
 
 @pytest.mark.parametrize(
-    ("raw", "hint"),
+    ("raw", "hint", "filename"),
     [
-        (b"\xff\xfe" + "system_prompt: Be concise.\n".encode("utf-16-le"), "appears to be UTF-16 encoded"),
-        (b"\xfe\xff" + "system_prompt: Be concise.\n".encode("utf-16-be"), "appears to be UTF-16 encoded"),
-        (b"system_prompt: \x80\x81\xff\n", "File is not valid UTF-8"),
+        (
+            b"\xff\xfe" + "system_prompt: Be concise.\n".encode("utf-16-le"),
+            "appears to be UTF-16 encoded",
+            "agent.yaml",
+        ),
+        (
+            b"\xfe\xff" + "system_prompt: Be concise.\n".encode("utf-16-be"),
+            "appears to be UTF-16 encoded",
+            "agent.yaml",
+        ),
+        (
+            "You are a helper.\nKeep trying until it works.\n".encode("utf-16-le"),
+            "without a byte-order mark",
+            "prompt.txt",
+        ),
+        (b"system_prompt: \x80\x81\xff\n", "File is not valid UTF-8", "agent.yaml"),
     ],
-    ids=["utf16-le", "utf16-be", "invalid-utf8"],
+    ids=["utf16-le", "utf16-be", "bomless-utf16-le", "invalid-utf8"],
 )
 @pytest.mark.parametrize("input_kind", ["file", "directory", "stdin"])
-@pytest.mark.parametrize("output_format", ["terminal", "json", "sarif"])
+@pytest.mark.parametrize("output_format", ["terminal", "markdown", "json", "sarif", "gitlab"])
 def test_encoding_errors_fail_all_cli_input_and_output_paths(
-    tmp_path, monkeypatch, capsys, raw, hint, input_kind, output_format
+    tmp_path, monkeypatch, capsys, raw, hint, filename, input_kind, output_format
 ):
     monkeypatch.chdir(tmp_path)
     if input_kind == "stdin":
         monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(raw)))
-        inputs = ["-", "--stdin-filename", "agent.yaml"]
+        inputs = ["-", "--stdin-filename", filename]
     else:
-        (tmp_path / "agent.yaml").write_bytes(raw)
-        inputs = ["agent.yaml" if input_kind == "file" else "."]
+        (tmp_path / filename).write_bytes(raw)
+        inputs = [filename if input_kind == "file" else "."]
 
     assert main(["scan", *inputs, "--format", output_format]) == 1
     captured = capsys.readouterr()
@@ -167,16 +205,22 @@ def test_encoding_errors_fail_all_cli_input_and_output_paths(
         assert notification["level"] == "error"
         # SARIF intentionally omits filenames and raw diagnostic text.
         assert notification["message"]["text"] == "Input could not be inspected"
+    elif output_format == "gitlab":
+        assert json.loads(captured.out) == []
+        assert filename in captured.err
+        assert hint in captured.err
     else:
-        assert "agent.yaml" in captured.out
+        assert filename in captured.out
         assert hint in captured.out
         assert "UTF-8" in captured.out
-        assert "agent.yaml" in captured.err
+        assert filename in captured.err
         assert hint in captured.err
         if output_format == "json":
             [result] = json.loads(captured.out)
             assert result["verdict"] == "ERROR"
             assert hint in result["input_error"]
+        elif output_format == "markdown":
+            assert "# Lintlang Input Error" in captured.out
         else:
             assert "ERROR" in captured.out
 
