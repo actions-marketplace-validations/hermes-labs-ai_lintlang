@@ -15,6 +15,7 @@ PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "proof-benchmark.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish.yml"
 RETIRED_RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-sync.yml"
 RELEASE_NOTES = REPO_ROOT / ".github" / "releases" / "v0.8.3.md"
+CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 README = REPO_ROOT / "README.md"
 SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync-version-docs.py"
 
@@ -121,6 +122,17 @@ def test_curated_release_notes_match_the_083_public_contract():
     assert "No LLM calls during scanning" in notes
     assert "v0.8.2...v0.8.3" in notes
     assert "false positive" not in notes.lower()
+
+
+def test_changelog_keeps_the_encoding_guard_claim_bounded():
+    release_section = CHANGELOG.read_text(encoding="utf-8").split("## [0.8.2]", 1)[0]
+
+    assert "Common ASCII-heavy, NUL-dense BOM-less UTF-16 and UTF-32 inputs" in release_section
+    assert "bounded 8 KiB prefix" in release_section
+    assert "20% or greater NUL" in release_section
+    assert "not universal wide-encoding detection" in release_section
+    assert "/pull/180" in release_section
+    assert "BOM-less UTF-16 and UTF-32 input can no longer" not in release_section
 
 
 def test_readme_ci_history_claim_stays_within_the_verified_tag_range():

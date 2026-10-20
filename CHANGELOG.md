@@ -23,6 +23,17 @@
 
 ### Fixed
 
+- Common ASCII-heavy, NUL-dense BOM-less UTF-16 and UTF-32 inputs no longer
+  decode as NUL-laden UTF-8 and silently produce a clean scan. The parser
+  checks a bounded 8 KiB prefix and rejects inputs at 20% or greater NUL
+  density with conversion guidance, while preserving sparse-NUL UTF-8. This
+  is a bounded input-integrity guard, not universal wide-encoding detection.
+  Named files, directory scans, standard input, and every report format share
+  the explicit input error. Reported in
+  [#168](https://github.com/hermes-labs-ai/lintlang/issues/168); fixed by
+  [@yunaremaia](https://github.com/yunaremaia) in
+  [#179](https://github.com/hermes-labs-ai/lintlang/pull/179) and refined in
+  [#180](https://github.com/hermes-labs-ai/lintlang/pull/180).
 - Invalid YAML tool names now preserve more precise path and field context in
   their diagnostics. Fixed in
   [#174](https://github.com/hermes-labs-ai/lintlang/pull/174).
