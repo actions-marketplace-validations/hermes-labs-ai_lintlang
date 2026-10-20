@@ -122,6 +122,13 @@ def test_curated_release_notes_match_the_083_public_contract():
     assert "No LLM calls during scanning" in notes
     assert "v0.8.2...v0.8.3" in notes
     assert "false positive" not in notes.lower()
+    assert "[@Soham-o](https://github.com/Soham-o)" in notes
+    assert "/pull/170" in notes
+    assert "/pull/174" in notes
+    assert "[@yunaremaia](https://github.com/yunaremaia)" in notes
+    assert "/pull/179" in notes
+    assert "/pull/180" in notes
+    assert "bounded NUL-density input-integrity guard" in notes
 
 
 def test_changelog_keeps_the_encoding_guard_claim_bounded():
@@ -132,6 +139,8 @@ def test_changelog_keeps_the_encoding_guard_claim_bounded():
     assert "20% or greater NUL" in release_section
     assert "not universal wide-encoding detection" in release_section
     assert "/pull/180" in release_section
+    assert release_section.count("[@Soham-o](https://github.com/Soham-o)") == 2
+    assert "[@yunaremaia](https://github.com/yunaremaia)" in release_section
     assert "BOM-less UTF-16 and UTF-32 input can no longer" not in release_section
 
 

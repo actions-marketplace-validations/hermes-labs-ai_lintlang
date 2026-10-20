@@ -5,7 +5,8 @@
 ### Added
 
 - Project instruction discovery now includes `.cursor/rules/*.mdc` files,
-  including the pre-commit integration path. Added in
+  including the pre-commit integration path. Contributed by
+  [@Soham-o](https://github.com/Soham-o) in
   [#170](https://github.com/hermes-labs-ai/lintlang/pull/170).
 - The shipped framework fixtures now document CrewAI backstory extraction and
   explicit coverage errors for short CrewAI role/goal and root AutoGen-style
@@ -35,7 +36,8 @@
   [#179](https://github.com/hermes-labs-ai/lintlang/pull/179) and refined in
   [#180](https://github.com/hermes-labs-ai/lintlang/pull/180).
 - Invalid YAML tool names now preserve more precise path and field context in
-  their diagnostics. Fixed in
+  their diagnostics. Contributed by
+  [@Soham-o](https://github.com/Soham-o) in
   [#174](https://github.com/hermes-labs-ai/lintlang/pull/174).
 
 ## [0.8.2] - 2026-09-30
