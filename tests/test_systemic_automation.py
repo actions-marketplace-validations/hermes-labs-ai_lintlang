@@ -12,7 +12,8 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "proof-benchmark.yml"
-RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-sync.yml"
+RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish.yml"
+RETIRED_RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-sync.yml"
 RELEASE_NOTES = REPO_ROOT / ".github" / "releases" / "v0.8.3.md"
 README = REPO_ROOT / "README.md"
 SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync-version-docs.py"
@@ -59,13 +60,13 @@ def test_release_workflow_is_tag_driven_and_publishes_curated_release_once():
     jobs = workflow["jobs"]
 
     assert 'tags:\n      - "v*"' in text
-    assert "workflow_call:" in text
     assert "workflow_dispatch:" in text
-    assert set(jobs) == {"build", "github-release", "pypi-dispatch"}
+    assert not RETIRED_RELEASE_WORKFLOW.exists()
+    assert set(jobs) == {"build", "github-release", "publish"}
     assert all(
         job.get("permissions", {}).get("contents") != "write"
         for name, job in jobs.items()
-        if name not in {"github-release", "pypi-dispatch"}
+        if name != "github-release"
     )
     build_run = "\n".join(str(step.get("run", "")) for step in jobs["build"]["steps"])
     release_run = "\n".join(str(step.get("run", "")) for step in jobs["github-release"]["steps"])
@@ -94,18 +95,11 @@ def test_release_workflow_is_tag_driven_and_publishes_curated_release_once():
     assert "--draft=false" in release_run
     assert release_run.count("gh release create") == 1
     assert "dist/*.tar.gz" in release_run
-    pypi = jobs["pypi-dispatch"]
+    pypi = jobs["publish"]
     assert pypi["needs"] == "github-release"
-    assert pypi["permissions"] == {"actions": "write", "contents": "read"}
-    assert pypi["env"] == {
-        "GH_TOKEN": "${{ github.token }}",
-        "RELEASE_TAG": "${{ inputs.tag || github.ref_name }}",
-    }
-    dispatch_run = "\n".join(str(step.get("run", "")) for step in pypi["steps"])
-    assert "gh workflow run publish.yml" in dispatch_run
-    assert '--ref "$RELEASE_TAG"' in dispatch_run
-    assert '-f tag="$RELEASE_TAG"' in dispatch_run
-    assert '-f source_run_id="$GITHUB_RUN_ID"' in dispatch_run
+    assert pypi["environment"] == "pypi"
+    assert pypi["permissions"] == {"actions": "read", "id-token": "write"}
+    assert any(step.get("uses", "").startswith("pypa/gh-action-pypi-publish@") for step in pypi["steps"])
     action_steps = [
         step
         for job in jobs.values()
