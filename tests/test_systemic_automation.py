@@ -208,6 +208,23 @@ def test_version_sync_updates_known_current_surfaces_and_preserves_held_pins():
     )
 
 
+def test_version_sync_checks_the_tag_specific_release_notes(tmp_path):
+    sync = load_sync_script()
+    notes = tmp_path / ".github" / "releases" / "v0.8.4.md"
+    notes.parent.mkdir(parents=True)
+    notes.write_text(
+        "# LintLang v0.8.3\n\n`uvx --from lintlang==0.8.3 lintlang scan .`\n",
+        encoding="utf-8",
+    )
+
+    assert notes in sync.release_surfaces(tmp_path, "0.8.4")
+    assert sync.main(["--version", "0.8.4", "--root", str(tmp_path), "--check"]) == 1
+    assert sync.main(["--version", "0.8.4", "--root", str(tmp_path)]) == 0
+    assert notes.read_text(encoding="utf-8") == (
+        "# LintLang v0.8.4\n\n`uvx --from lintlang==0.8.4 lintlang scan .`\n"
+    )
+
+
 def test_version_sync_updates_versions_of_record_without_touching_other_fields():
     sync = load_sync_script()
 

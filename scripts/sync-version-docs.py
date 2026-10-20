@@ -68,6 +68,13 @@ def synchronized(text: str, version: str) -> str:
 def synchronized_release_surface(path: Path, text: str, version: str) -> str:
     """Update a known current-version surface while preserving held pins."""
     text = synchronized(text, version)
+    if path.parent == Path(".github/releases"):
+        text = re.sub(
+            rf"(?m)^(# LintLang v){VERSION}(\b.*)$",
+            rf"\g<1>{version}\g<2>",
+            text,
+            count=1,
+        )
     for pattern, replacement in COMMAND_PIN_REPLACEMENTS:
         text = pattern.sub(replacement.format(version=version), text)
     if path in CURRENT_PIN_FILES:
@@ -109,8 +116,9 @@ def synchronized_release_surface(path: Path, text: str, version: str) -> str:
     return text
 
 
-def release_surfaces(root: Path) -> list[Path]:
+def release_surfaces(root: Path, version: str) -> list[Path]:
     relative_paths = CURRENT_PIN_FILES | JSON_VERSION_FILES | {
+        Path(f".github/releases/v{version}.md"),
         Path("CITATION.cff"),
         Path("pyproject.toml"),
         Path("src/lintlang/__init__.py"),
@@ -132,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
 
     changed: list[Path] = []
     root = args.root.resolve()
-    for path in release_surfaces(root):
+    for path in release_surfaces(root, args.version):
         before = path.read_text(encoding="utf-8")
         after = synchronized_release_surface(path.relative_to(root), before, args.version)
         if after == before:
