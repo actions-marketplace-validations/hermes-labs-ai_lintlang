@@ -19,6 +19,12 @@ HOOKS = yaml.safe_load((REPO_ROOT / ".pre-commit-hooks.yaml").read_text(encoding
 CHECKOUT_V7_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 LINTLANG_ACTION_VERSION = "v0.7.0"
 LINTLANG_V070_SHA = "175a9a19414aff9a1752d3b9850d6cf58d59fb32"
+PROJECT_VERSION_MATCH = re.search(
+    r'(?m)^version\s*=\s*"([^"]+)"',
+    (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+)
+assert PROJECT_VERSION_MATCH is not None
+PROJECT_VERSION = PROJECT_VERSION_MATCH.group(1)
 
 
 def test_precommit_hook_is_explicit_and_advisory_by_default():
@@ -226,7 +232,7 @@ def test_reference_docs_show_exercised_install_and_hook_paths():
     assert "pipx install lintlang" in reference
     assert "pipx ensurepath" in reference
     assert "repo: https://github.com/hermes-labs-ai/lintlang" in integration
-    assert "rev: v0.8.3" in integration
+    assert f"rev: v{PROJECT_VERSION}" in integration
     assert "id: lintlang" in integration
     assert "args: [AGENTS.md, --fail-on, fail]" in integration
     assert "pre-commit install" in integration

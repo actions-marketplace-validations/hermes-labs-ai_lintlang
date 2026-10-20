@@ -13,6 +13,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "proof-benchmark.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-sync.yml"
+RELEASE_NOTES = REPO_ROOT / ".github" / "releases" / "v0.8.3.md"
 SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync-version-docs.py"
 
 
@@ -51,7 +52,7 @@ def test_proof_workflow_is_nightly_clean_timed_and_sarif_backed():
     assert '"fail"' in loop
 
 
-def test_release_workflow_is_tag_driven_read_only_and_publishes_a_release():
+def test_release_workflow_is_tag_driven_and_publishes_curated_release_once():
     text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
     workflow = yaml.safe_load(text)
     jobs = workflow["jobs"]
@@ -70,9 +71,27 @@ def test_release_workflow_is_tag_driven_read_only_and_publishes_a_release():
     assert "scripts/sync-version-docs.py" in build_run
     assert "--check" in build_run
     assert "git push" not in text
-    assert "--generate-notes" in release_run
+    assert ".github/releases/${RELEASE_TAG}.md" in build_run
+    assert "release-notes.md" in build_run
+    assert "release-title.txt" in build_run
+    assert "--notes-file dist/release-notes.md" in release_run
+    assert '--title "$release_title"' in release_run
+    assert "--generate-notes" not in release_run
+    assert release_run.count("gh release create") == 1
     action_steps = [step for job in jobs.values() for step in job["steps"] if "uses" in step]
     assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", step["uses"]) for step in action_steps)
+
+
+def test_curated_release_notes_match_the_083_public_contract():
+    notes = RELEASE_NOTES.read_text(encoding="utf-8")
+
+    assert notes.startswith("# LintLang v0.8.3 — Better agent-file discovery and diagnostics\n")
+    assert "`.cursor/rules/*.mdc`" in notes
+    assert "Invalid YAML tool names" in notes
+    assert "uvx --from lintlang==0.8.3 lintlang scan ." in notes
+    assert "No LLM calls during scanning" in notes
+    assert "v0.8.2...v0.8.3" in notes
+    assert "false positive" not in notes.lower()
 
 
 def test_repository_docs_are_already_version_synced():
@@ -109,3 +128,50 @@ def test_version_sync_does_not_rewrite_unrelated_historical_pins():
     assert "lintlang@v0.5.0" in updated
     assert "rev: v0.5.0" in updated
     assert "lintlang==0.3.1" in updated
+
+
+def test_version_sync_updates_known_current_surfaces_and_preserves_held_pins():
+    sync = load_sync_script()
+
+    current = sync.synchronized_release_surface(
+        Path("integrations/claude-code/README.md"),
+        "uvx --from lintlang==0.8.3 lintlang --version\nversion 0.8.3 or newer\n",
+        "0.8.4",
+    )
+    held = sync.synchronized_release_surface(
+        Path("integrations/devcontainer/src/lintlang/README.md"),
+        "The intentionally held package is lintlang==0.7.0.\n",
+        "0.8.4",
+    )
+    evidence = sync.synchronized_release_surface(
+        Path("docs/integrations.md"),
+        "Use `uvx --from lintlang==0.8.3`. Public evidence pins `lintlang==0.3.1`.\n",
+        "0.8.4",
+    )
+
+    assert "lintlang==0.8.4" in current
+    assert "version 0.8.4 or newer" in current
+    assert held == "The intentionally held package is lintlang==0.7.0.\n"
+    assert evidence == (
+        "Use `uvx --from lintlang==0.8.4`. Public evidence pins `lintlang==0.3.1`.\n"
+    )
+
+
+def test_version_sync_updates_versions_of_record_without_touching_other_fields():
+    sync = load_sync_script()
+
+    pyproject = sync.synchronized_release_surface(
+        Path("pyproject.toml"),
+        '[project]\nname = "lintlang"\nversion = "0.8.3"\n\n[tool.example]\nversion = "1.2.3"\n',
+        "0.8.4",
+    )
+    metadata = sync.synchronized_release_surface(
+        Path("codemeta.json"),
+        '{\n  "version": "0.8.3",\n  "url": "https://pypi.org/project/lintlang/0.8.3/"\n}\n',
+        "0.8.4",
+    )
+
+    assert 'version = "0.8.4"' in pyproject
+    assert 'version = "1.2.3"' in pyproject
+    assert '"version": "0.8.4"' in metadata
+    assert "/lintlang/0.8.4/" in metadata
