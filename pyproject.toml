@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lintlang"
-version = "0.5.0"
+version = "0.8.3"
 description = "Static linter for AI agent configs, tool descriptions, and system prompts with zero-LLM CI gating"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -54,22 +54,25 @@ dev = [
     "pre-commit>=4.5,<5",
     "pytest>=9.0.3",
     "pytest-cov>=5.0",
-    "ruff~=0.16.1",
+    "ruff>=0.16.1,<0.18.0",
 ]
 
 [project.scripts]
 lintlang = "lintlang.cli:main"
 
+[project.entry-points."hermes_agent.plugins"]
+lintlang = "lintlang.integrations.hermes_agent:register"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/lintlang"]
 
 [tool.hatch.build.targets.sdist]
-# WORKSPACE.md documents which local clone is canonical for this maintainer.
-# It carries absolute paths under a home directory and names unrelated internal
-# repositories, none of which mean anything to someone who downloaded a tarball
-# from PyPI. Useful in the git checkout, wrong in a published artifact.
+# .hermes/WORKSPACE.md documents which local clone is canonical for this
+# maintainer. It carries absolute paths under a home directory and names
+# unrelated internal repositories, none of which mean anything to someone who
+# downloaded a tarball from PyPI. Useful in the git checkout, wrong in a
+# published artifact. The ".hermes/**" exclusion below already covers it.
 exclude = [
-    "WORKSPACE.md",
     "GAP.md",
     ".hermes/**",
     ".github/workflows/hermes-quality.yml",

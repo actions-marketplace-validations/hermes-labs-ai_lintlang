@@ -1,6 +1,7 @@
 """Tests for the CLI interface."""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -185,7 +186,7 @@ class TestCLI:
         monkeypatch.chdir(tmp_path)
         source_dir = tmp_path / "configs"
         source_dir.mkdir()
-        (source_dir / "clean.yaml").write_text("system_prompt: You are helpful.\n", encoding="utf-8")
+        (source_dir / "clean.yaml").write_bytes((SAMPLES_DIR / "clean_config.yaml").read_bytes())
         (source_dir / "excluded.yaml").write_text(
             "system_prompt: Keep trying until it works.\n",
             encoding="utf-8",
@@ -200,7 +201,7 @@ class TestCLI:
                 "--exclude",
                 "excluded.yaml",
                 "--fail-under",
-                "101",
+                "100",
             ]
         )
 
@@ -328,6 +329,97 @@ class TestCLI:
         # HERM score should NOT appear in terminal output
         assert "HERM Score:" not in captured.out
 
+    def test_terminal_explains_confidence_coverage_drivers(self, capsys):
+        main(["scan", str(SAMPLES_DIR / "reference_document.txt")])
+        output = capsys.readouterr().out
+        assert "Confidence: LOW (65% coverage proxy; low <75%)" in output
+        assert "Primary driver: Prompt-like framing was not detected" in output
+        assert "(-25 percentage points)" in output
+        assert "No user-input or untrusted-input boundary language was detected" in output
+        assert "not a statistical probability" in output
+        assert "HERM Score:" not in output
+
+    def test_json_confidence_breakdown_matches_coverage_proxies(self, capsys):
+        main(
+            [
+                "scan",
+                str(SAMPLES_DIR / "reference_document.txt"),
+                "--format",
+                "json",
+            ]
+        )
+        result = json.loads(capsys.readouterr().out)[0]
+        breakdown = result["herm"]["confidence_breakdown"]
+        assert breakdown["label"] == "low"
+        assert breakdown["coverage_percent"] == 65
+        assert breakdown["primary_driver"] == "prompt_like_framing"
+        assert breakdown["confidence_thresholds"] == {
+            "high_minimum_coverage": 0.9,
+            "medium_minimum_coverage": 0.75,
+        }
+        assert [driver["id"] for driver in breakdown["drivers"]] == [
+            "prompt_like_framing",
+            "input_surface",
+        ]
+
+    def test_markdown_reports_confidence_guidance(self, capsys):
+        main(
+            [
+                "scan",
+                str(SAMPLES_DIR / "reference_document.txt"),
+                "--format",
+                "markdown",
+            ]
+        )
+        output = capsys.readouterr().out
+        assert "**Confidence:** low (65% coverage proxy; low <75%)" in output
+        assert "**prompt_like_framing**" in output
+
+    def test_scan_help_explains_confidence_output(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["scan", "--help"])
+        assert exc_info.value.code == 0
+        output = capsys.readouterr().out
+        assert "coverage proxies" in output
+        assert "herm.confidence_breakdown" in output
+
+    def test_scan_terminal_redirected_output_has_no_ansi(self, capsys, monkeypatch):
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+
+        exit_code = main(["scan", str(SAMPLES_DIR / "clean_config.yaml")])
+
+        assert exit_code == 0
+        assert "\033[" not in capsys.readouterr().out
+
+    def test_scan_terminal_honors_no_color(self, capsys, monkeypatch):
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        monkeypatch.setenv("NO_COLOR", "1")
+
+        exit_code = main(["scan", str(SAMPLES_DIR / "clean_config.yaml")])
+
+        assert exit_code == 0
+        output = capsys.readouterr().out
+        assert "\033[" not in output
+        assert "https://github.com/hermes-labs-ai/lintlang" in output
+
+    def test_scan_terminal_multi_file_repo_pointer_is_emitted_once(self, capsys, monkeypatch):
+        """Interactive multi-file scans should point to the repo once overall."""
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+        exit_code = main(
+            [
+                "scan",
+                str(SAMPLES_DIR / "clean_config.yaml"),
+                str(SAMPLES_DIR / "bad_tool_descriptions.yaml"),
+            ]
+        )
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        pointer = "https://github.com/hermes-labs-ai/lintlang"
+        assert captured.out.count(pointer) == 1
+        assert captured.out.rfind(pointer) > captured.out.find("SUMMARY")
+
     def test_fail_on_fail_passes_clean(self):
         """Clean config should pass with --fail-on fail."""
         exit_code = main(["scan", str(SAMPLES_DIR / "clean_config.yaml"), "--fail-on", "fail"])
@@ -352,6 +444,34 @@ class TestCLI:
         exit_code = main(["scan", str(SAMPLES_DIR / "clean_config.yaml"), "--fail-under", "80"])
         assert exit_code == 0
 
+    @pytest.mark.parametrize(
+        "value", ["nan", "NaN", "inf", "+inf", "-inf", "1e309", "-5", "-0.001", "100.001", "150", "abc", ""]
+    )
+    def test_fail_under_rejects_invalid_values_before_scanning(self, value, monkeypatch, capsys):
+        def unexpected_scan(args):
+            pytest.fail("Invalid threshold reached the scanner")
+
+        monkeypatch.setattr("lintlang.cli._cmd_scan", unexpected_scan)
+        with pytest.raises(SystemExit) as exc_info:
+            main(["scan", str(SAMPLES_DIR / "clean_config.yaml"), f"--fail-under={value}"])
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "--fail-under" in captured.err
+        assert "finite number between 0 and 100" in captured.err
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("0", 0), ("-0.0", 0), ("80", 0), ("80.5", 0), ("8e1", 0), ("98", 0), ("98.001", 1), ("100", 1)],
+    )
+    def test_fail_under_preserves_valid_thresholds(self, value, expected):
+        # The fixture scores 98: equality passes, while a higher threshold fails.
+        assert main(["scan", str(SAMPLES_DIR / "clean_config.yaml"), "--fail-under", value]) == expected
+
+    @pytest.mark.parametrize("value", ["0", "-0.0"])
+    def test_fail_under_zero_keeps_gate_disabled(self, value):
+        assert main(["scan", str(SAMPLES_DIR / "bad_agent_config.json"), "--fail-under", value]) == 0
+
     def test_patterns_command(self):
         exit_code = main(["patterns"])
         assert exit_code == 0
@@ -374,6 +494,66 @@ class TestCLI:
         """CLI should return 1 when no files are successfully scanned."""
         exit_code = main(["scan", "/nonexistent/file.yaml"])
         assert exit_code == 1
+
+    def test_directory_scan_with_no_matching_files_is_an_input_error(self, tmp_path, capsys):
+        """A valid directory containing only non-prompt files (README, LICENSE)
+        has zero scannable candidates. An invoked scan that inspected nothing
+        proves no coverage, so it is an input error at the process boundary
+        (previously: exit 0 with a bare stderr note). ``--allow-empty`` is the
+        only opt-out; see TestEmptyScanIsNonzero.
+        """
+        (tmp_path / "README.md").write_text("# hi\n")
+        (tmp_path / "LICENSE").write_text("MIT\n")
+
+        exit_code = main(["scan", str(tmp_path)])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Error: No files were inspected" in captured.err
+        assert "--allow-empty" in captured.err
+
+        assert main(["scan", str(tmp_path), "--allow-empty"]) == 0
+        assert "Error:" not in capsys.readouterr().err
+
+    def test_python_scan_with_only_python_excluded_patterns_warns(self, tmp_path, capsys):
+        """scan_python_file() never runs H1/H3/H7 against extracted prompts —
+        they reason over a declared config schema that AST extraction from
+        .py source does not produce. Requesting --patterns H1 against a .py
+        file therefore always scores zero structural findings, which would
+        otherwise look identical to a genuinely clean PASS to a CI gate using
+        --fail-on. The CLI must warn instead of staying silent.
+        """
+        python_file = tmp_path / "pipeline.py"
+        python_file.write_text("CONFIDENCE_THRESHOLD = 0.75\n")
+
+        exit_code = main(["scan", str(python_file), "--patterns", "H1", "--fail-on", "fail"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Warning" in captured.err
+        assert "H1" in captured.err
+        assert "do not apply to Python extraction mode" in captured.err
+
+    def test_python_scan_with_applicable_pattern_does_not_warn(self, tmp_path, capsys):
+        """The warning is specific to patterns scan_python_file() always
+        skips — a pattern it actually runs (H2) must not trigger it."""
+        python_file = tmp_path / "pipeline.py"
+        python_file.write_text("CONFIDENCE_THRESHOLD = 0.75\n")
+
+        exit_code = main(["scan", str(python_file), "--patterns", "H2"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "do not apply to Python extraction mode" not in captured.err
+
+    def test_non_python_scan_with_excluded_patterns_does_not_warn(self, capsys):
+        """The warning only fires for .py inputs — H1/H3/H7 are the normal,
+        fully-applicable detectors for YAML/JSON/text config files."""
+        exit_code = main(["scan", str(SAMPLES_DIR / "bad_tool_descriptions.yaml"), "--patterns", "H1"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "do not apply to Python extraction mode" not in captured.err
 
     def test_fail_on_with_missing_file(self):
         """CLI should not silently pass when all files are missing."""
@@ -485,3 +665,290 @@ class TestCLI:
         assert "signal_counts" in result["herm"]
         assert "coverage" in result["herm"]
         assert "confidence" in result["herm"]
+
+
+class TestRepositoryDiscovery:
+    """`--discover` is an opt-in repository mode over recognized instruction
+    surfaces. Explicit inputs stay canonical and generic directory scanning
+    keeps its broad extension sweep."""
+
+    @staticmethod
+    def _repository(root: Path) -> None:
+        (root / "AGENTS.md").write_text("You are an agent. Follow the steps.\n", encoding="utf-8")
+        (root / "README.md").write_text("# Readme\n", encoding="utf-8")
+        (root / "docs").mkdir()
+        (root / "docs" / "notes.md").write_text("Some prose about the project.\n", encoding="utf-8")
+        skill = root / "skills" / "audit"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("Audit the config carefully.\n", encoding="utf-8")
+
+    def test_discover_selects_only_recognized_instruction_files(self, tmp_path, monkeypatch, capsys):
+        self._repository(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        exit_code = main(["scan", "--discover", "--format", "json"])
+
+        assert exit_code == 0
+        data = json.loads(capsys.readouterr().out)
+        assert sorted(Path(item["file"]).name for item in data) == ["AGENTS.md", "SKILL.md"]
+
+    def test_discover_accepts_an_explicit_root(self, tmp_path, capsys):
+        self._repository(tmp_path)
+
+        exit_code = main(["scan", "--discover", str(tmp_path), "--format", "json"])
+
+        assert exit_code == 0
+        data = json.loads(capsys.readouterr().out)
+        assert sorted(Path(item["file"]).name for item in data) == ["AGENTS.md", "SKILL.md"]
+
+    def test_generic_directory_scan_is_unchanged_by_discovery(self, tmp_path, capsys):
+        """A plain directory argument keeps the broad extension sweep: it still
+        inspects docs/notes.md, which discovery deliberately never selects."""
+        self._repository(tmp_path)
+
+        exit_code = main(["scan", str(tmp_path), "--format", "json"])
+
+        assert exit_code == 0
+        data = json.loads(capsys.readouterr().out)
+        names = sorted(Path(item["file"]).name for item in data)
+        assert names == ["AGENTS.md", "SKILL.md", "notes.md"]
+
+    def test_discover_unions_and_dedupes_with_explicit_files(self, tmp_path, monkeypatch, capsys):
+        self._repository(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        exit_code = main(["scan", "AGENTS.md", "docs/notes.md", "--discover", "--format", "json"])
+
+        assert exit_code == 0
+        data = json.loads(capsys.readouterr().out)
+        files = [item["file"] for item in data]
+        assert files.count("AGENTS.md") == 1
+        assert sorted(Path(f).name for f in files) == ["AGENTS.md", "SKILL.md", "notes.md"]
+
+    def test_discover_names_the_instruction_symlinks_it_skipped(self, tmp_path, capsys):
+        """Discovery does not follow symlinks, and it must not hide that.
+
+        A recognized instruction file that is a symlink is a coverage gap: it
+        is not scanned, and nothing in the scan output says so. The scan
+        continues and stays exit 0; only the gap is named, on stderr.
+        """
+        self._repository(tmp_path)
+        (tmp_path / "CLAUDE.md").symlink_to(tmp_path / "AGENTS.md")
+        (tmp_path / "LICENSE.md").symlink_to(tmp_path / "README.md")
+
+        exit_code = main(["scan", "--discover", str(tmp_path), "--format", "json"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert sorted(Path(item["file"]).name for item in json.loads(captured.out)) == ["AGENTS.md", "SKILL.md"]
+        assert "CLAUDE.md: it is a symlink" in captured.err
+        assert "does not follow symlinks" in captured.err
+        # An unrecognized symlink was never a discovery target, so it is not a gap.
+        assert "LICENSE.md" not in captured.err
+
+    def test_discover_is_silent_when_no_instruction_symlink_was_skipped(self, tmp_path, capsys):
+        self._repository(tmp_path)
+
+        assert main(["scan", "--discover", str(tmp_path), "--format", "json"]) == 0
+        assert "symlink" not in capsys.readouterr().err
+
+    def test_discover_symlink_notice_honours_exclude_globs(self, tmp_path, capsys):
+        """An excluded path is not a coverage gap: the caller said so."""
+        self._repository(tmp_path)
+        (tmp_path / "docs" / "CLAUDE.md").symlink_to(tmp_path / "AGENTS.md")
+
+        exit_code = main(["scan", "--discover", str(tmp_path), "--exclude", "docs/**", "--format", "json"])
+
+        assert exit_code == 0
+        assert "symlink" not in capsys.readouterr().err
+
+    def test_discover_root_must_exist(self, tmp_path, capsys):
+        exit_code = main(["scan", "--discover", str(tmp_path / "absent")])
+
+        assert exit_code == 1
+        assert "Error:" in capsys.readouterr().err
+
+    def test_discover_with_no_recognized_files_is_an_empty_scan_error(self, tmp_path, capsys):
+        (tmp_path / "README.md").write_text("# Readme\n", encoding="utf-8")
+
+        exit_code = main(["scan", "--discover", str(tmp_path)])
+
+        assert exit_code == 1
+        assert "No files were inspected" in capsys.readouterr().err
+
+    def test_scan_without_files_or_discover_fails_clearly(self, capsys):
+        exit_code = main(["scan"])
+
+        assert exit_code != 0
+        captured = capsys.readouterr()
+        assert "Error:" in captured.err
+        assert "--discover" in captured.err
+
+    def test_discover_root_that_is_a_file_explains_the_spelling(self, tmp_path, capsys):
+        """`--discover` takes an optional ROOT, so `scan --discover FILE` reads
+        FILE as that root. Say so rather than reporting a bare type error."""
+        target = tmp_path / "AGENTS.md"
+        target.write_text("You are an agent.\n", encoding="utf-8")
+
+        exit_code = main(["scan", "--discover", str(target)])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "not a directory" in captured.err
+        assert "scan FILE --discover" in captured.err
+
+    def test_discover_honours_exclude_globs(self, tmp_path, monkeypatch, capsys):
+        """Discovery is an input source, not a separate filtering contract: a
+        repository that keeps deliberately broken instruction fixtures must be
+        able to keep them out of its own repository-mode gate."""
+        self._repository(tmp_path)
+        fixtures = tmp_path / "tests" / "fixtures"
+        fixtures.mkdir(parents=True)
+        (fixtures / "AGENTS.md").write_text("Loop over the queue indefinitely.\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        exit_code = main(["scan", "--discover", "--exclude", "tests/**", "--format", "json"])
+
+        assert exit_code == 0
+        data = json.loads(capsys.readouterr().out)
+        assert all("fixtures" not in item["file"] for item in data)
+        assert sorted(Path(item["file"]).name for item in data) == ["AGENTS.md", "SKILL.md"]
+
+    def test_discover_honours_lintlangignore(self, tmp_path, monkeypatch, capsys):
+        self._repository(tmp_path)
+        vendored = tmp_path / "vendor" / "pkg"
+        vendored.mkdir(parents=True)
+        (vendored / "AGENTS.md").write_text("Loop over the queue indefinitely.\n", encoding="utf-8")
+        (tmp_path / ".lintlangignore").write_text("vendor/**\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        exit_code = main(["scan", "--discover", "--format", "json"])
+
+        assert exit_code == 0
+        data = json.loads(capsys.readouterr().out)
+        assert all("vendor" not in item["file"] for item in data)
+
+    def test_discover_is_rejected_together_with_stdin(self, tmp_path, capsys):
+        """One invocation, one unambiguous source of files. A union would have
+        to define what happens when the virtual stdin path and a discovered
+        path name the same document; rejecting is the smaller contract."""
+        self._repository(tmp_path)
+
+        exit_code = main(["scan", "-", "--stdin-filename", "AGENTS.md", "--discover", str(tmp_path)])
+
+        assert exit_code == 2
+        assert "cannot be combined with --discover" in capsys.readouterr().err
+
+
+class TestEmptyScanIsNonzero:
+    """An invoked scan that inspects zero files is an input/coverage error at
+    every boundary: terminal, JSON, SARIF, and process status."""
+
+    def test_directory_scan_with_no_matching_files_is_an_error(self, tmp_path, capsys):
+        (tmp_path / "README.md").write_text("# hi\n", encoding="utf-8")
+        (tmp_path / "LICENSE").write_text("MIT\n", encoding="utf-8")
+
+        exit_code = main(["scan", str(tmp_path)])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Error: No files were inspected" in captured.err
+        assert "--allow-empty" in captured.err
+
+    def test_empty_scan_json_reports_the_error(self, tmp_path, capsys):
+        (tmp_path / "README.md").write_text("# hi\n", encoding="utf-8")
+
+        exit_code = main(["scan", str(tmp_path), "--format", "json"])
+
+        assert exit_code == 1
+        data = json.loads(capsys.readouterr().out)
+        assert len(data) == 1
+        assert data[0]["verdict"] == "ERROR"
+        assert "No files were inspected" in data[0]["input_error"]
+        assert data[0]["inspected"] == {}
+        assert data[0]["not_inspected"] == []
+        assert data[0]["skipped"] is None
+        assert data[0]["structural_findings"] == []
+        assert data[0]["herm"] is None
+
+    def test_empty_scan_sarif_is_unsuccessful_and_nonzero(self, tmp_path, capsys):
+        (tmp_path / "README.md").write_text("# hi\n", encoding="utf-8")
+
+        exit_code = main(["scan", str(tmp_path), "--format", "sarif"])
+
+        assert exit_code == 1
+        document = json.loads(capsys.readouterr().out)
+        invocation = document["runs"][0]["invocations"][0]
+        assert invocation["executionSuccessful"] is False
+        assert "No files were inspected" in invocation["toolExecutionNotifications"][0]["message"]["text"]
+
+    def test_allow_empty_restores_exit_zero(self, tmp_path, capsys):
+        (tmp_path / "README.md").write_text("# hi\n", encoding="utf-8")
+
+        exit_code = main(["scan", str(tmp_path), "--allow-empty", "--format", "json"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == []
+        assert "No matching files found to scan." in captured.err
+        assert "Error:" not in captured.err
+
+    def test_allow_empty_sarif_agrees_with_the_exit_status(self, tmp_path, capsys):
+        """The whole point of the zero-file contract is that the report and the
+        process status never disagree. `--allow-empty` is an accepted outcome,
+        so SARIF must not declare the run unsuccessful at exit 0."""
+        (tmp_path / "README.md").write_text("# hi\n", encoding="utf-8")
+
+        exit_code = main(["scan", str(tmp_path), "--allow-empty", "--format", "sarif"])
+
+        assert exit_code == 0
+        document = json.loads(capsys.readouterr().out)
+        invocation = document["runs"][0]["invocations"][0]
+        assert invocation["executionSuccessful"] is True
+        assert "toolExecutionNotifications" not in invocation
+
+    def test_write_baseline_empty_scan_error_is_unchanged(self, tmp_path, capsys):
+        (tmp_path / "README.md").write_text("# hi\n", encoding="utf-8")
+        baseline = tmp_path / "baseline.json"
+
+        exit_code = main(["scan", str(tmp_path), "--format", "json", "--write-baseline", str(baseline)])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == []
+        assert "No files were successfully scanned" in captured.err
+        assert f"baseline {baseline} was not written." in captured.err
+        assert not baseline.exists()
+
+    def test_scan_utf16_file_with_bom_exits_1_with_actionable_error(self, tmp_path, capsys):
+        utf16_file = tmp_path / "agent.yaml"
+        utf16_file.write_bytes(b"\xff\xfe" + "system_prompt: You are helpful.\n".encode("utf-16-le"))
+
+        exit_code = main(["scan", str(utf16_file), "--format", "json"])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data) == 1
+        assert data[0]["verdict"] == "ERROR"
+        err = data[0]["input_error"]
+        assert "LintLang reads UTF-8" in err
+        assert "appears to be UTF-16 encoded" in err
+        assert "save or convert the file as UTF-8" in err
+        assert "appears to be UTF-16 encoded" in captured.err
+
+    def test_scan_arbitrary_non_utf8_bytes_exits_1_with_actionable_error(self, tmp_path, capsys):
+        bad_file = tmp_path / "bad.json"
+        bad_file.write_bytes(b"\x80\x81\x82\xff")
+
+        exit_code = main(["scan", str(bad_file), "--format", "json"])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data) == 1
+        assert data[0]["verdict"] == "ERROR"
+        err = data[0]["input_error"]
+        assert "File is not valid UTF-8" in err
+        assert "LintLang requires UTF-8 encoding" in err
+        assert "File is not valid UTF-8" in captured.err

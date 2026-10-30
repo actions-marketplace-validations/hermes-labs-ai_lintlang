@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "lintlang",
+  "version": "0.8.3",
+  "description": "Lint agent-facing interfaces: instructions, prompts, MCP and function-tool definitions, and parameter schemas. Local, deterministic audits with advisory feedback after supported Claude Code edits.",
+  "author": {
+    "name": "Hermes Labs",
+    "email": "roli@hermes-labs.ai"
+  },
+  "homepage": "https://lintlang.ai/",
+  "repository": "https://github.com/hermes-labs-ai/lintlang",
+  "license": "Apache-2.0"
+}

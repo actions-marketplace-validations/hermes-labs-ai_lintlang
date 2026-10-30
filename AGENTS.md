@@ -1,15 +1,21 @@
 # AGENTS.md
 
+<!-- Prompt v1.0 — 2026-09-21 -->
+
 `lintlang` is a static linter for AI agent configs, tool definitions, and system prompts.
+
+Instruction priority: preserve deterministic behavior and public output contracts first;
+satisfy the definition of done second; keep documentation and packaging aligned third.
+When these conflict, preserve behavior and output contracts.
 
 ## Workspace identity
 
 - The canonical upstream is `https://github.com/hermes-labs-ai/lintlang.git`.
 - Treat `git worktree list` as the authority for active linked worktrees.
 - Never assume the checked-out local branch matches public `origin/main`; verify the remote, branch, status, and intended base before editing.
-- Maintainers: `WORKSPACE.md` in the git checkout records which local clone is
-  canonical. It is not part of the published package and is not needed to work
-  on the code.
+- Maintainers: `.hermes/WORKSPACE.md` in the git checkout records which local
+  clone is canonical. It is not part of the published package and is not
+  needed to work on the code.
 
 ## Use it for
 
@@ -26,6 +32,13 @@
 - proving an agent is safe in production
 - retrieving preferences from history, deciding truth, or silently rewriting/sending prompts
 
+## Key paths
+
+- `src/lintlang/` — package source (detectors, CLI, preflight)
+- `tests/` — pytest suite, including packaging-boundary and doc-consistency checks
+- `samples/` — clean and deliberately bad fixtures used by CI and docs
+- `action.yml` — the GitHub Action wrapper around the CLI
+
 ## Minimal commands
 
 ```bash
@@ -35,6 +48,7 @@ lintlang scan samples/bad_tool_descriptions.yaml
 printf '%s' 'Is it true that X?' | lintlang preflight - --format json
 pytest -q
 ruff check src/ tests/
+python -m build
 ```
 
 ## Output shape
@@ -42,8 +56,10 @@ ruff check src/ tests/
 - repository scan outcomes: `ERROR`, `PASS`, `REVIEW`, or `FAIL`
 - structural findings by pattern `H1` through `H7`, plus Python pipeline findings `P1` and `P2`
 - JSON output for CI via `--format json`
+- conservative `scan --fix` for `Don't be verbose` as the first body line after a file-leading `# Instructions`; `--dry-run` previews and `--backup` saves the original bytes
 - preflight states: `ALLOW`, `NOTICE`, `HOLD`, `UNAVAILABLE`, or `ERROR`
 - preflight evidence uses exact code-point spans and stable `PF001`-`PF005` IDs
+- scan reports explain the HERM confidence coverage proxies separately from the structural verdict
 
 ## Success means
 
@@ -65,3 +81,12 @@ ruff check src/ tests/
 - keep the tool fully offline and deterministic
 - keep repository `scan` and in-flight `preflight` result types and exit semantics separate
 - keep heuristic preflight findings notice-only; only exact contract/conflict rules may hold
+
+## Definition of done
+
+- `pytest -q` and `ruff check src/ tests/` pass
+- new or changed detector behavior has a covering test and a fixture in `samples/` if user-visible
+- `lintlang scan samples/clean_config.yaml` still exits clean
+- README, `AGENTS.md`, and CLI `--help` output stay consistent with the change
+- automatic rewrites remain exact, scope-checked, and fail closed; semantic suggestions stay manual
+- no new performance, accuracy, or production-readiness claim was added without evidence

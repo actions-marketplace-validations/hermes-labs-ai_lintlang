@@ -8,13 +8,23 @@ import sys
 from pathlib import Path
 
 _WORKFLOW_PATH = Path(".github/workflows/lintlang.yml")
-_DEFAULT_INPUTS = (
+
+#: Deterministic first-match order for automatic scan-target selection.
+#:
+#: The *membership* of this tuple is the shared recognized-instruction
+#: definition owned by :mod:`lintlang.instructions`; the *order* is this
+#: command's own stable preference and is asserted against the primitive by
+#: the test suite. An explicit ``--path`` always wins over every entry here.
+DEFAULT_INPUT_ORDER = (
     Path("AGENTS.md"),
     Path("CLAUDE.md"),
     Path(".github/copilot-instructions.md"),
+    Path(".github/instructions"),
+    Path("GEMINI.md"),
     Path("agent.yaml"),
     Path("agent.yml"),
     Path("agent.json"),
+    Path("SKILL.md"),
 )
 
 _WORKFLOW = """name: LintLang
@@ -24,26 +34,52 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
-  security-events: write
-
 jobs:
-  language-contract:
+  scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Scan agent instructions
-        uses: hermes-labs-ai/lintlang@6be2907d557e534732865d3a3a3c55ea5f1a0ec9 # v0.4.1
+        uses: hermes-labs-ai/lintlang@175a9a19414aff9a1752d3b9850d6cf58d59fb32 # v0.7.0
         with:
           path: __LINTLANG_INPUT__
           fail-on: fail
           sarif-file: lintlang.sarif
 
+      - name: Preserve SARIF
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lintlang-sarif
+          path: lintlang.sarif
+          if-no-files-found: error
+
+  upload-sarif:
+    needs: scan
+    if: always() && (github.event_name == 'push' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out repository for SARIF fingerprinting
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download SARIF
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lintlang-sarif
+
       - name: Upload SARIF
-        if: always() && (github.event_name == 'push' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository))
         uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
         with:
           sarif_file: lintlang.sarif
@@ -83,7 +119,7 @@ def _git_root(start: Path) -> Path | None:
 
 def _scan_target(root: Path, requested: str | None) -> Path:
     if requested is None:
-        target = next((candidate for candidate in _DEFAULT_INPUTS if (root / candidate).exists()), None)
+        target = next((candidate for candidate in DEFAULT_INPUT_ORDER if (root / candidate).exists()), None)
         if target is None:
             raise ValueError(
                 "No supported instruction file was found; rerun with --path <repository-relative input>"

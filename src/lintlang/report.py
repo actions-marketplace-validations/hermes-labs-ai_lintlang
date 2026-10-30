@@ -13,10 +13,16 @@ from __future__ import annotations
 import re
 
 from . import __version__
+from .herm import confidence_breakdown
 from .patterns import Finding, Severity
-from .scanner import ScanResult
+from .scanner import ScanResult, describe_inspected
 
 _ANSI_ESCAPE = re.compile(r"\033\[[0-9;]*m")
+
+
+def strip_ansi(value: str) -> str:
+    """Return terminal-formatted text without ANSI styling."""
+    return _ANSI_ESCAPE.sub("", value)
 
 
 def _ansi_len(s: str) -> int:
@@ -66,6 +72,8 @@ def compute_verdict(value: ScanResult | list[Finding]) -> str:
     if isinstance(value, ScanResult):
         if value.input_error is not None:
             return "ERROR"
+        if value.skipped is not None:
+            return "SKIPPED"
         findings = value.structural_findings
     else:
         findings = value
@@ -81,12 +89,11 @@ def compute_verdict(value: ScanResult | list[Finding]) -> str:
 
 def _verdict_display(verdict: str) -> tuple[str, str]:
     """Return (icon, color) for a verdict."""
-    if verdict == "PASS":
-        return "✅", GREEN
-    elif verdict == "REVIEW":
-        return "⚠️", YELLOW
-    else:
-        return "❌", BRIGHT_RED
+    return {
+        "PASS": ("✅", GREEN),
+        "SKIPPED": ("⏭️", DIM),
+        "REVIEW": ("⚠️", YELLOW),
+    }.get(verdict, ("❌", BRIGHT_RED))
 
 
 def _severity_summary(findings: list[Finding]) -> str:
@@ -102,12 +109,56 @@ def _severity_summary(findings: list[Finding]) -> str:
     return ", ".join(parts) if parts else "0 findings"
 
 
+def _confidence_lines(result: ScanResult, *, markdown: bool = False) -> list[str]:
+    """Render the exact coverage proxies behind this result's HERM label."""
+    breakdown = confidence_breakdown(result.herm)
+    label = str(breakdown["label"])
+    coverage = int(breakdown["coverage_percent"])
+    thresholds = breakdown["confidence_thresholds"]
+    band = {
+        "high": f"high ≥{round(float(thresholds['high_minimum_coverage']) * 100)}%",
+        "medium": f"medium ≥{round(float(thresholds['medium_minimum_coverage']) * 100)}%",
+        "low": f"low <{round(float(thresholds['medium_minimum_coverage']) * 100)}%",
+    }[label]
+    drivers = breakdown["drivers"]
+    if markdown:
+        lines = [f"**Confidence:** {label} ({coverage}% coverage proxy; {band})"]
+        if drivers:
+            for driver in drivers:
+                penalty = round(float(driver["coverage_penalty"]) * 100)
+                lines.append(
+                    f"- **{driver['id']}** (-{penalty} percentage points): "
+                    f"{driver['reason']} {driver['guidance']}"
+                )
+        else:
+            lines.append("No coverage-proxy deductions were triggered.")
+        lines.append(str(breakdown["interpretation"]))
+        return lines
+
+    lines = [f"  Confidence: {label.upper()} ({coverage}% coverage proxy; {band})"]
+    if drivers:
+        for driver in drivers:
+            title = "Primary driver" if driver["id"] == breakdown["primary_driver"] else "Driver"
+            penalty = round(float(driver["coverage_penalty"]) * 100)
+            lines.append(f"    {title}: {driver['reason']} (-{penalty} percentage points)")
+            lines.append(f"      {driver['guidance']}")
+    else:
+        lines.append("    No coverage-proxy deductions were triggered.")
+    lines.append(f"    {breakdown['interpretation']}")
+    return lines
+
+
 # ── Terminal Report ────────────────────────────────────────────────
+
+
+MAX_SHOWN_PER_CODE = 5
 
 
 def format_terminal(
     result: ScanResult,
     show_suggestions: bool = True,
+    baseline_count: int | None = None,
+    show_all: bool = False,
 ) -> str:
     """Format a ScanResult for terminal output with ANSI colors."""
     lines: list[str] = []
@@ -124,11 +175,24 @@ def format_terminal(
     lines.append("")
 
     # Verdict
-    lines.append(f"  {icon} {BOLD}{vcolor}{verdict}{RESET} — {_severity_summary(findings)}")
+    if verdict == "SKIPPED":
+        lines.append(f"  {icon} {BOLD}{verdict}{RESET} — nothing inspected (this is not a PASS)")
+    else:
+        lines.append(f"  {icon} {BOLD}{vcolor}{verdict}{RESET} — {_severity_summary(findings)}")
+    if result.input_error is None and result.skipped is None:
+        lines.append(f"  {DIM}Inspected: {describe_inspected(result.inspected)}{RESET}")
+        lines.extend(_confidence_lines(result))
+    for note in result.notes:
+        lines.append(f"  {YELLOW}Not inspected: {note}{RESET}")
+    if baseline_count is not None:
+        lines.append(f"  Baseline: {baseline_count} recorded finding(s) acknowledged; verdict covers remaining findings.")
     lines.append("")
 
     if result.input_error is not None:
         lines.append(f"  {BRIGHT_RED}Input error: {result.input_error}{RESET}")
+        lines.append("")
+    elif result.skipped is not None:
+        lines.append(f"  Nothing to inspect: {result.skipped}.")
         lines.append("")
     # Structural findings (H1-H7) — the main output
     elif findings:
@@ -142,7 +206,17 @@ def format_terminal(
             lines.append(f"  {BOLD}{pid}: {pattern_name}{RESET}")
             lines.append("")
 
+            # A manifest with 27 undescribed tools has one problem, 27 times. Show
+            # enough of each kind to act on and count the rest; JSON, SARIF and
+            # --show-all always carry every finding.
+            shown_per_kind: dict[tuple[str, Severity], int] = {}
+            hidden: dict[tuple[str, Severity], list[Finding]] = {}
             for f in pattern_findings:
+                kind_key = (f.code, f.severity)
+                shown_per_kind[kind_key] = shown_per_kind.get(kind_key, 0) + 1
+                if not show_all and shown_per_kind[kind_key] > MAX_SHOWN_PER_CODE:
+                    hidden.setdefault(kind_key, []).append(f)
+                    continue
                 color = COLORS[f.severity]
                 icon_f = _severity_icon(f.severity)
                 # Print the sub-code. Without it every H1 result renders
@@ -151,15 +225,27 @@ def format_terminal(
                 # verb" — and a code documented as citable ("that's an H1.6")
                 # never actually appears anywhere a human reads.
                 code = f"{f.sub_id} " if f.sub_id else ""
+                where = f.location
+                if f.source_region is not None and result.file:
+                    where = f"{result.file}:{f.source_region.start_line}  {DIM}{f.location}{RESET}"
                 lines.append(
                     f"    {color}{icon_f} [{f.severity.value.upper()}]{RESET} "
-                    f"{BOLD}{code}{RESET}{f.location}"
+                    f"{BOLD}{code}{RESET}{where}"
                 )
                 lines.append(f"      {f.description}")
                 if f.evidence:
                     lines.append(f'      {DIM}Evidence: "{f.evidence}"{RESET}')
                 if show_suggestions:
                     lines.append(f"      {DIM}→ {f.suggestion}{RESET}")
+                lines.append("")
+
+            for (code_key, severity), rest in hidden.items():
+                where = ", ".join(f.location for f in rest[:6]) + (", ..." if len(rest) > 6 else "")
+                lines.append(
+                    f"    {COLORS[severity]}+ {len(rest)} more {code_key} [{severity.value.upper()}]{RESET} "
+                    f"{DIM}{where}{RESET}"
+                )
+                lines.append(f"      {DIM}(--show-all lists every finding){RESET}")
                 lines.append("")
     else:
         lines.append(f"  {GREEN}No structural issues found.{RESET}")
@@ -178,6 +264,7 @@ def format_terminal(
 def format_markdown(
     result: ScanResult,
     show_suggestions: bool = True,
+    baseline_count: int | None = None,
 ) -> str:
     """Format a ScanResult as a Markdown document."""
     lines: list[str] = []
@@ -190,6 +277,8 @@ def format_markdown(
         verdict_md = "⚠️ **REVIEW**"
     elif verdict == "FAIL":
         verdict_md = "❌ **FAIL**"
+    elif verdict == "SKIPPED":
+        verdict_md = "⏭️ **SKIPPED** (nothing inspected; not a PASS)"
     else:
         verdict_md = "❌ **ERROR**"
 
@@ -201,11 +290,24 @@ def format_markdown(
 
     # Verdict
     lines.append(f"**Verdict:** {verdict_md} — {_severity_summary(findings)}")
+    if result.input_error is None and result.skipped is None:
+        lines.append("")
+        lines.append(f"**Inspected:** {describe_inspected(result.inspected)}")
+        lines.append("")
+        lines.extend(_confidence_lines(result, markdown=True))
+    for note in result.notes:
+        lines.append("")
+        lines.append(f"**Not inspected:** {note}")
+    if baseline_count is not None:
+        lines.append(f"**Baseline:** {baseline_count} recorded finding(s) acknowledged; verdict covers remaining findings.")
     lines.append("")
 
     # Structural findings
     if result.input_error is not None:
         lines.append(f"**Input error:** {result.input_error}")
+        lines.append("")
+    elif result.skipped is not None:
+        lines.append(f"Nothing to inspect: {result.skipped}.")
         lines.append("")
     elif findings:
         lines.append("## Findings")
@@ -224,7 +326,8 @@ def format_markdown(
             for f in pattern_findings:
                 severity_badge = f"**[{f.severity.value.upper()}]**"
                 code = f"{f.sub_id} " if f.sub_id else ""
-                lines.append(f"#### {severity_badge} {code}`{f.location}`")
+                line_md = f" (line {f.source_region.start_line})" if f.source_region is not None else ""
+                lines.append(f"#### {severity_badge} {code}`{f.location}`{line_md}")
                 lines.append("")
                 lines.append(f"{f.description}")
                 lines.append("")
@@ -268,6 +371,7 @@ def _verdict_short(verdict: str) -> tuple[str, str]:
         "REVIEW": ("\u26a0\ufe0f  REV", YELLOW),
         "FAIL": ("\u274c FAIL", BRIGHT_RED),
         "ERROR": ("\u274c ERROR", BRIGHT_RED),
+        "SKIPPED": ("-  SKIP", DIM),
     }.get(verdict, ("\u274c ERROR", BRIGHT_RED))
 
 
@@ -280,15 +384,18 @@ def format_summary_table(results: dict[str, ScanResult], elapsed: float) -> str:
         return ""
 
     rows: list[tuple[str, str, str, str]] = []  # (file, verdict, color, findings)
-    verdict_counts = {"PASS": 0, "REVIEW": 0, "FAIL": 0, "ERROR": 0}
+    verdict_counts = {"PASS": 0, "REVIEW": 0, "FAIL": 0, "ERROR": 0, "SKIPPED": 0}
 
     for fpath, result in results.items():
         verdict = compute_verdict(result)
         verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
         display, color = _verdict_short(verdict)
-        findings_str = (
-            "input error" if result.input_error is not None else _findings_compact(result.structural_findings)
-        )
+        if result.input_error is not None:
+            findings_str = "input error"
+        elif result.skipped is not None:
+            findings_str = "nothing to inspect"
+        else:
+            findings_str = _findings_compact(result.structural_findings)
         rows.append((fpath, display, color, findings_str))
 
     # Column widths
@@ -359,6 +466,14 @@ def format_summary_table(results: dict[str, ScanResult], elapsed: float) -> str:
         lines.append(
             f"  \u2502 {'':<{col_file}} "
             f"\u2502 {error_str}{' ' * (col_verdict - _ansi_len(error_str))} "
+            f"\u2502 {'':<{col_findings}} \u2502"
+        )
+
+    if verdict_counts["SKIPPED"]:
+        skip_str = f"{DIM}{verdict_counts['SKIPPED']} SKIP{RESET}"
+        lines.append(
+            f"  \u2502 {'':<{col_file}} "
+            f"\u2502 {skip_str}{' ' * (col_verdict - _ansi_len(skip_str))} "
             f"\u2502 {'':<{col_findings}} \u2502"
         )
 

@@ -16,7 +16,8 @@ Primary CLI:
 - `printf '%s' 'Is it true that X?' | lintlang preflight - --format json`
 
 Outputs:
-- ERROR, PASS, REVIEW, or FAIL scan outcomes
+- ERROR, PASS, REVIEW, FAIL, or SKIPPED (nothing to inspect; never a pass) scan outcomes
+- an `inspected` count of the tools, prompts and messages each verdict covers
 - structural findings with pattern IDs `H1` to `H7`, `P1`, and `P2`
 - optional JSON output for CI pipelines
 - separate preflight states `ALLOW`, `NOTICE`, `HOLD`, `UNAVAILABLE`, and `ERROR`
@@ -32,6 +33,12 @@ Key success condition:
 - the same input files produce the same verdict and structural findings with no network or model calls
 - the same preflight request produces byte-stable redacted output; unavailable coverage never becomes clean
 
+## Third-party adoption (public sources)
+
+- Character.AI's Larch repository pins `lintlang==0.3.1` in CI and fails on HIGH or CRITICAL findings; its linting reference links this repository as the upstream: https://github.com/character-ai/larch/blob/210d08a8f6c1b0dd14c27b709c66471bd31a5636/docs/linting.md (pin recorded in https://github.com/character-ai/larch/blob/7963b4c432747f32bcba22960745568a330344f3/.github/workflows/requirements-agent-linters.txt, merged via https://github.com/character-ai/larch/pull/7960)
+- MegaLinter's third-party plugin catalog lists lintlang as the `AI_LINTLANG` linter and resolves the descriptor from this repository; the linked record documents an opt-in plugin entry, not a bundled MegaLinter default: https://github.com/oxsecurity/megalinter/blob/9d4e685d4f31cecdd53743a08704cd23d9c01811/docs/plugins.md
+- Independent Gentoo packaging in the unofficial Haven overlay, which tracks upstream releases across successive ebuild bumps and whose `metadata.xml` records this repository as the upstream remote: https://github.com/thehaven/haven-overlay/tree/fbed4463d4e213a3bce98babbfc72ef78722d255/dev-util/lintlang
+
 ## About Hermes Labs
 
-Hermes Labs is an independent AI-reliability lab building open-source tools that catch silent failure modes in production AI. More at [hermes-labs.ai](https://hermes-labs.ai).
+Hermes Labs is an agentic infrastructure company building the reliability layer for autonomous systems. More at [hermes-labs.ai](https://hermes-labs.ai).
